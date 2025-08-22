@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>3D Pneumatic Cup Selection System</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <style>
+    :root{--bg1:#f0f2f5;--bg2:#e4e6eb}
+    *{box-sizing:border-box}
+    body{margin:0;background:linear-gradient(135deg,var(--bg1),var(--bg2));font-family:Inter,system-ui,Arial,sans-serif;overflow:hidden}
+    canvas{display:block}
+    .controls{
+      position:fixed;inset:auto auto 24px 24px;
+      background:#ffffffdd;padding:12px 14px;border-radius:12px;
+      box-shadow:0 12px 30px rgba(0,0,0,.25);backdrop-filter:saturate(160%) blur(6px)
+    }
+    .controls h4{margin:0 0 8px 0;font-size:12px;letter-spacing:.08em;color:#444;text-transform:uppercase}
+    .row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+    button{
+      appearance:none;border:0;border-radius:10px;padding:8px 12px;
+      background:#1f9d55;color:#fff;font-size:12px;cursor:pointer;box-shadow:0 2px 0 rgba(0,0,0,.15); transition: transform 0.1s ease;
+    }
+    button:active { transform: translateY(1px); }
+    button.secondary{background:#3b82f6}
+    button.ghost{background:#e5e7eb;color:#111}
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <h4>Controls</h4>
+    <div class="row">
+      <button onclick="extendCylinder()">Extend Down</button>
+      <button class="ghost" onclick="retractCylinder()">Retract Up</button>
+      <button class="secondary" onclick="toggleVacuum()">Toggle Vacuum</button>
+      <button class="ghost" onclick="resetView()">Reset View</button>
+    </div>
+    <div style="font-size:11px;color:#333;opacity:.9">Drag to rotate • Wheel to zoom</div>
+  </div>
+
+  <script>
+    let scene, camera, renderer, rig;
+    let rodGroup, springStack, cupGroup;
+    let currentRodY = 0, targetRodY = 0;
+    let vacuumOn = false;
+
+    // Mouse orbit controls
+    let isDown=false, mx=0, my=0, tx= -0.25, ty=0.65, rx= -0.25, ry=0.65, dist=30;
+
+    init();
+    animate();
+
+    function init(){
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xf3f4f6);
+
+      camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 1000);
+
+      renderer = new THREE.WebGLRenderer({antialias:true});
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.shadowMap.enabled = false;
+      document.body.appendChild(renderer.domElement);
+
+      // Lights
+      scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+      const keyLight = new THREE.DirectionalLight(0xffffff, 0.8);
+      keyLight.position.set(15, 25, 15);
+      scene.add(keyLight);
+
+      // Build the assembly
+      buildSystem();
+
+      // Event Listeners
+      window.addEventListener('resize', onResize);
+      renderer.domElement.addEventListener('mousedown', e=>{isDown=true;mx=e.clientX;my=e.clientY});
+      window.addEventListener('mouseup', ()=>isDown=false);
+      window.addEventListener('mousemove', e=>{
+        if(!isDown) return;
+        ty += (e.clientX - mx) * 0.003;
+        tx += (e.clientY - my) * 0.003;
+        mx = e.clientX; my = e.clientY;
+      });
+      window.addEventListener('wheel', e=>{
+        dist *= (e.deltaY>0?1.08:0.92);
+        dist = Math.max(10, Math.min(70, dist));
+      });
+      
+      resetView();
+    }
+
+    function buildSystem(){
+      rig = new THREE.Group();
+      scene.add(rig);
+
+      // --- Material Definitions ---
+      const grey = new THREE.MeshLambertMaterial({color:0xadb5bd});
+      const darkGrey = new THREE.MeshLambertMaterial({color:0x495057});
+      const green = new THREE.MeshLambertMaterial({color:0x28a745});
+      const blue  = new THREE.MeshLambertMaterial({color:0x007bff});
+      const yellow= new THREE.MeshLambertMaterial({color:0xffc107});
+
+      // --- Mounting Flange (L-shape) ---
+      const flange = new THREE.Group();
+      const flangeVertical = new THREE.Mesh(new THREE.BoxGeometry(0.6, 7, 4), grey);
+      flangeVertical.position.set(3.6, 2.5, 0);
+      const flangeHorizontal = new THREE.Mesh(new THREE.BoxGeometry(7, 0.6, 4), grey);
+      flangeHorizontal.position.set(-0.2, -1.1, 0);
+      flange.add(flangeVertical, flangeHorizontal);
+      rig.add(flange);
+
+      // --- Cup Selection Valve (Left Block) ---
+      const valve = new THREE.Group();
+      const valveBody = new THREE.Mesh(new THREE.BoxGeometry(5.6, 2.4, 3), yellow);
+      valveBody.position.set(-0.2, -2.5, 0);
+      valve.add(valveBody);
+
+      const blueStripe = new THREE.Mesh(new THREE.BoxGeometry(5.6, 1.2, 3.01), blue);
+      blueStripe.position.set(-0.2, -2.5, 0);
+      valve.add(blueStripe);
+
+      // Vertical line detail on valve
+      const valveLine = new THREE.Mesh(new THREE.BoxGeometry(0.2, 2.4, 3.02), darkGrey);
+      valveLine.position.set(-1.5, -2.5, 0);
+      valve.add(valveLine);
+      rig.add(valve);
+
+      // --- Cup Selection Retraction Cylinder (Right, Green) ---
+      const cylinderHousing = new THREE.Mesh(new THREE.BoxGeometry(3.2, 6.2, 3.2), green);
+      cylinderHousing.position.set(5, 2.7, 0);
+      rig.add(cylinderHousing);
+
+      // --- MOVING ASSEMBLY: Rod + Bracket + Spring + Cup ---
+      rodGroup = new THREE.Group();
+      rodGroup.position.set(5, -0.4, 0); // Originates at housing bottom center
+      rig.add(rodGroup);
+
+      // Rod
+      const rod = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 5.2, 20), grey);
+      rod.position.y = 0.4;
+      rodGroup.add(rod);
+
+      // C-shaped bracket
+      // *** MODIFIED: Centered all bracket components on the X-axis ***
+      const cBracket = new THREE.Group();
+      const cTop = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.4, 1.5), grey);
+      cTop.position.set(0, -0.2, 0);
+      const cSide = new THREE.Mesh(new THREE.BoxGeometry(0.4, 2.5, 1.5), grey);
+      cSide.position.set(-1.05, -1.65, 0); // Kept side piece to one side for C-shape
+      const cBottom = new THREE.Mesh(new THREE.BoxGeometry(2.5, 0.4, 1.5), grey);
+      cBottom.position.set(0, -3.1, 0);
+      cBracket.add(cTop, cSide, cBottom);
+      cBracket.position.y = -2; // Adjust vertical position of bracket
+      rodGroup.add(cBracket);
+      
+      // Spring Housing (part of C-Bracket)
+      // *** MODIFIED: Centered on X-axis ***
+      const springHousing = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 1.0, 20), darkGrey);
+      springHousing.position.set(0, -2.4, 0);
+      rodGroup.add(springHousing);
+
+      // Spring Coils
+      springStack = new THREE.Group();
+      for(let i=0; i<8; i++){
+        const coil = new THREE.Mesh(new THREE.TorusGeometry(0.6, 0.1, 10, 20), green);
+        coil.rotation.x = Math.PI/2;
+        // *** MODIFIED: Centered on X-axis ***
+        coil.position.set(0, -2.8 - (i*0.25), 0);
+        springStack.add(coil);
+      }
+      rodGroup.add(springStack);
+
+      // Vacuum Cup
+      cupGroup = new THREE.Group();
+      const cup = new THREE.Mesh(new THREE.ConeGeometry(1.8, 1.5, 32), blue);
+      // *** MODIFIED: Centered on X-axis ***
+      cup.position.set(0, -5.5, 0);
+      cupGroup.add(cup);
+      rodGroup.add(cupGroup);
+      
+      // --- Pneumatic Air Connection (Simple Tube) ---
+      const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 3.5, 16), blue);
+      tube.rotation.z = Math.PI / 2;
+      tube.position.set(1.2, -2.4, 0);
+      rig.add(tube);
+    }
+
+    // --- Controls ---
+    function extendCylinder(){ targetRodY = -3.0; }
+    function retractCylinder(){ targetRodY = 0.0; }
+
+    function toggleVacuum(){
+      vacuumOn = !vacuumOn;
+      const cup = cupGroup.children[0];
+      cup.material.color.setHex(vacuumOn ? 0x800000 : 0x007bff);
+    }
+
+    function resetView(){ tx = -0.25; ty = 0.65; dist = 30; }
+
+    // --- Render loop ---
+    function animate(){
+      requestAnimationFrame(animate);
+
+      // Lerp (smooth) the rod movement
+      currentRodY += (targetRodY - currentRodY) * 0.1;
+      rodGroup.position.y = -0.4 + currentRodY;
+
+      // *** MODIFIED: Removed all spring scaling and position logic ***
+
+      // Smooth orbit camera updates
+      rx += (tx - rx) * 0.1;
+      ry += (ty - ry) * 0.1;
+      const camX = Math.sin(ry) * Math.cos(rx) * dist;
+      const camZ = Math.cos(ry) * Math.cos(rx) * dist;
+      const camY = Math.sin(rx) * dist;
+      
+      camera.position.set(camX, camY, camZ);
+      camera.lookAt(0, 0, 0);
+
+      renderer.render(scene, camera);
+    }
+
+    function onResize(){
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    }
+  </script>
+</body>
+</html>
